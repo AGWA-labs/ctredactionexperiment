@@ -1,0 +1,24 @@
+An implementation of
+https://mailarchive.ietf.org/arch/msg/trans/gGWZhqCXG0wlkktB_d0a2fPM4VU
+along with the fix suggested here:
+https://mailarchive.ietf.org/arch/msg/trans/UihNrMpEwxtAmXx80vfLlm6U2SE
+
+This repository builds a program named ctredactionexperiment which reads
+an X.509 certificate (in DER) from STDIN and writes the reconstructed
+pre-certificate TBSCertificate (in DER) to STDOUT.
+
+
+BUILD:
+	go build
+
+
+EXAMPLES:
+
+An unredacted certificate:
+	openssl x509 -outform DER < examples/unredacted.crt | ./ctredactionexperiment | openssl asn1parse -inform DER
+
+An redacted certificate:
+	openssl x509 -outform DER < examples/redacted.crt | ./ctredactionexperiment | openssl asn1parse -inform DER
+
+An redacted certificate with mismatched label:
+	openssl x509 -outform DER < examples/bad_redacted.crt | ./ctredactionexperiment
