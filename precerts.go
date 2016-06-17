@@ -10,6 +10,8 @@
 package main
 
 import (
+	"errors"
+	"bytes"
 	"encoding/asn1"
 )
 
@@ -17,9 +19,93 @@ var (
 	oidExtensionAuthorityKeyId	= []int{2, 5, 29, 35}
 	oidExtensionSCT			= []int{1, 3, 6, 1, 4, 1, 11129, 2, 4, 2}
 	oidExtensionCTPoison		= []int{1, 3, 6, 1, 4, 1, 11129, 2, 4, 3}
+	oidExtensionRedactedSANs	= []int{1, 3, 6, 1, 4, 1, 46450, 5, 123, 1}
 )
 
+func verifyDNSRedaction (dnsName []byte, redactedDNSName []byte) error {
+	// TODO: check for over-redaction (e.g. ?.com)
+	labels := bytes.Split(dnsName, []byte{'.'})
+	redactedLabels := bytes.Split(redactedDNSName, []byte{'.'})
+
+	if len(labels) != len(redactedLabels) {
+		return errors.New("Redacted and unredacted DNS name have different number of labels")
+	}
+
+	for i := range labels {
+		label := labels[i]
+		redactedLabel := redactedLabels[i]
+
+		if bytes.Equal(redactedLabel, []byte{'?'}) {
+			if bytes.Equal(label, []byte{'*'}) {
+				return errors.New("Wildcard label was redacted")
+			}
+		} else {
+			if !bytes.Equal(redactedLabel, label) {
+				return errors.New("Unredacted label does not match")
+			}
+		}
+	}
+	return nil
+}
+
+func verifyRedaction (sansBytes []byte, redactedSANsBytes []byte) error {
+	sans, err := parseSANExtension(nil, sansBytes)
+	if err != nil {
+		return err
+	}
+
+	redactedSANs, err := parseSANExtension(nil, redactedSANsBytes)
+	if err != nil {
+		return err
+	}
+
+	if len(sans) != len(redactedSANs) {
+		return errors.New("SANs extension and Redacted SANs extension have different lengths")
+	}
+
+	for i := range sans {
+		san := sans[i]
+		redactedSAN := redactedSANs[i]
+		if san.Type != redactedSAN.Type {
+			return errors.New("SAN and corresponding redacted SAN have different types")
+		}
+		switch san.Type {
+		case sanDNSName:
+			if err := verifyDNSRedaction(san.Value, redactedSAN.Value); err != nil {
+				return err
+			}
+		default:
+			if !bytes.Equal(san.Value, redactedSAN.Value) {
+				return errors.New("Non-DNS SAN has different value in Redacted SANs extension")
+			}
+		}
+	}
+
+	return nil
+}
+
 func ReconstructPrecertTBS (tbs *TBSCertificate) (*TBSCertificate, error) {
+	var sans []byte
+	var redactedSANs []byte
+
+	for _, ext := range tbs.Extensions {
+		switch {
+		case ext.Id.Equal(oidExtensionSubjectAltName):
+			sans = ext.Value
+		case ext.Id.Equal(oidExtensionRedactedSANs):
+			redactedSANs = ext.Value
+		}
+	}
+
+	if redactedSANs != nil {
+		if sans == nil {
+			return nil, errors.New("Certificate contains redacted SAN extension but no SAN extension")
+		}
+		if err := verifyRedaction(sans, redactedSANs); err != nil {
+			return nil, err
+		}
+	}
+
 	precertTBS := TBSCertificate{
 		Version:		tbs.Version,
 		SerialNumber:		tbs.SerialNumber,
@@ -36,6 +122,10 @@ func ReconstructPrecertTBS (tbs *TBSCertificate) (*TBSCertificate, error) {
 	for _, ext := range tbs.Extensions {
 		switch {
 		case ext.Id.Equal(oidExtensionSCT):
+		case ext.Id.Equal(oidExtensionSubjectAltName):
+			if redactedSANs == nil {
+				precertTBS.Extensions = append(precertTBS.Extensions, ext)
+			}
 		default:
 			precertTBS.Extensions = append(precertTBS.Extensions, ext)
 		}
