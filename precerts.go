@@ -13,6 +13,8 @@ import (
 	"errors"
 	"bytes"
 	"encoding/asn1"
+	"encoding/hex"
+	"crypto/sha256"
 )
 
 var (
@@ -20,9 +22,17 @@ var (
 	oidExtensionSCT			= []int{1, 3, 6, 1, 4, 1, 11129, 2, 4, 2}
 	oidExtensionCTPoison		= []int{1, 3, 6, 1, 4, 1, 11129, 2, 4, 3}
 	oidExtensionRedactedSANs	= []int{1, 3, 6, 1, 4, 1, 46450, 5, 123, 1}
+	oidExtensionRedactedLabelSalt	= []int{1, 3, 6, 1, 4, 1, 46450, 5, 123, 2}
 )
 
-func verifyDNSRedaction (dnsName []byte, redactedDNSName []byte) error {
+func hashLabel (label []byte, redactedLabelSalt []byte) []byte {
+	hash := sha256.New()
+	hash.Write(redactedLabelSalt)
+	hash.Write(label)
+	return []byte(hex.EncodeToString(hash.Sum(nil)))
+}
+
+func verifyDNSRedaction (dnsName []byte, redactedDNSName []byte, redactedLabelSalt []byte) error {
 	// TODO: check for over-redaction (e.g. ?.com)
 	labels := bytes.Split(dnsName, []byte{'.'})
 	redactedLabels := bytes.Split(redactedDNSName, []byte{'.'})
@@ -35,9 +45,12 @@ func verifyDNSRedaction (dnsName []byte, redactedDNSName []byte) error {
 		label := labels[i]
 		redactedLabel := redactedLabels[i]
 
-		if bytes.Equal(redactedLabel, []byte{'?'}) {
+		if len(redactedLabel) > 0 && redactedLabel[0] == '?' {
 			if bytes.Equal(label, []byte{'*'}) {
 				return errors.New("Wildcard label was redacted")
+			}
+			if !bytes.Equal(redactedLabel[1:], hashLabel(label, redactedLabelSalt)) {
+				return errors.New("Redacted label does not match")
 			}
 		} else {
 			if !bytes.Equal(redactedLabel, label) {
@@ -48,7 +61,7 @@ func verifyDNSRedaction (dnsName []byte, redactedDNSName []byte) error {
 	return nil
 }
 
-func verifyRedaction (sansBytes []byte, redactedSANsBytes []byte) error {
+func verifyRedaction (sansBytes []byte, redactedSANsBytes []byte, redactedLabelSalt []byte) error {
 	sans, err := parseSANExtension(nil, sansBytes)
 	if err != nil {
 		return err
@@ -71,7 +84,7 @@ func verifyRedaction (sansBytes []byte, redactedSANsBytes []byte) error {
 		}
 		switch san.Type {
 		case sanDNSName:
-			if err := verifyDNSRedaction(san.Value, redactedSAN.Value); err != nil {
+			if err := verifyDNSRedaction(san.Value, redactedSAN.Value, redactedLabelSalt); err != nil {
 				return err
 			}
 		default:
@@ -87,6 +100,7 @@ func verifyRedaction (sansBytes []byte, redactedSANsBytes []byte) error {
 func ReconstructPrecertTBS (tbs *TBSCertificate) (*TBSCertificate, error) {
 	var sans []byte
 	var redactedSANs []byte
+	var redactedLabelSalt []byte
 
 	for _, ext := range tbs.Extensions {
 		switch {
@@ -94,6 +108,8 @@ func ReconstructPrecertTBS (tbs *TBSCertificate) (*TBSCertificate, error) {
 			sans = ext.Value
 		case ext.Id.Equal(oidExtensionRedactedSANs):
 			redactedSANs = ext.Value
+		case ext.Id.Equal(oidExtensionRedactedLabelSalt):
+			redactedLabelSalt = ext.Value
 		}
 	}
 
@@ -101,7 +117,10 @@ func ReconstructPrecertTBS (tbs *TBSCertificate) (*TBSCertificate, error) {
 		if sans == nil {
 			return nil, errors.New("Certificate contains redacted SAN extension but no SAN extension")
 		}
-		if err := verifyRedaction(sans, redactedSANs); err != nil {
+		if redactedLabelSalt == nil {
+			return nil, errors.New("Certificate contains redacted SAN extension but no redacted label salt extension")
+		}
+		if err := verifyRedaction(sans, redactedSANs, redactedLabelSalt); err != nil {
 			return nil, err
 		}
 	}
@@ -122,6 +141,7 @@ func ReconstructPrecertTBS (tbs *TBSCertificate) (*TBSCertificate, error) {
 	for _, ext := range tbs.Extensions {
 		switch {
 		case ext.Id.Equal(oidExtensionSCT):
+		case ext.Id.Equal(oidExtensionRedactedLabelSalt):
 		case ext.Id.Equal(oidExtensionSubjectAltName):
 			if redactedSANs == nil {
 				precertTBS.Extensions = append(precertTBS.Extensions, ext)
