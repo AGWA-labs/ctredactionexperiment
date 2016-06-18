@@ -51,13 +51,6 @@ type SubjectAltName struct {
 	Value		[]byte
 }
 
-type RDNSequence []RelativeDistinguishedNameSET
-type RelativeDistinguishedNameSET []AttributeTypeAndValue
-type AttributeTypeAndValue struct {
-	Type	asn1.ObjectIdentifier
-	Value	asn1.RawValue
-}
-
 type TBSCertificate struct {
 	Raw			asn1.RawContent
 
